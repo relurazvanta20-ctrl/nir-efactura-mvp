@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
+         xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+  <cbc:ID>INV-30001</cbc:ID>
+  <cbc:IssueDate>2025-11-05</cbc:IssueDate>
+  <cbc:DocumentCurrencyCode>RON</cbc:DocumentCurrencyCode>
+
+  <!-- Linia 1: TVA 21% -->
+  <cac:InvoiceLine>
+    <cbc:ID>1</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="BUC">5</cbc:InvoicedQuantity>
+    <cac:Item><cbc:Name>Produs TVA 21%</cbc:Name></cac:Item>
+    <cac:Price><cbc:PriceAmount>100.00</cbc:PriceAmount></cac:Price>
+    <cac:TaxTotal>
+      <cac:TaxSubtotal>
+        <cbc:Percent>21</cbc:Percent>
+      </cac:TaxSubtotal>
+    </cac:TaxTotal>
+    <cbc:LineExtensionAmount>500.00</cbc:LineExtensionAmount>
+  </cac:InvoiceLine>
+
+  <!-- Linia 2: TVA 11% -->
+  <cac:InvoiceLine>
+    <cbc:ID>2</cbc:ID>
+    <cbc:InvoicedQuantity unitCode="KG">10</cbc:InvoicedQuantity>
+    <cac:Item><cbc:Name>Produs TVA 11%</cbc:Name></cac:Item>
+    <cac:Price><cbc:PriceAmount>50.00</cbc:PriceAmount></cac:Price>
+    <cac:TaxTotal>
+      <cac:TaxSubtotal>
+        <cbc:Percent>11</cbc:Percent>
+      </cac:TaxSubtotal>
+    </cac:TaxTotal>
+    <cbc:LineExtensionAmount>500.00</cbc:LineExtensionAmount>
+  </cac:InvoiceLine>
+
+  <!-- Totaluri -->
+  <cac:TaxTotal>
+    <cbc:TaxAmount>160.00</cbc:TaxAmount>
+  </cac:TaxTotal>
+  <cac:LegalMonetaryTotal>
+    <cbc:TaxExclusiveAmount>1000.00</cbc:TaxExclusiveAmount>
+    <cbc:TaxInclusiveAmount>1160.00</cbc:TaxInclusiveAmount>
+    <cbc:PayableAmount>1160.00</cbc:PayableAmount>
+  </cac:LegalMonetaryTotal>
+</Invoice>

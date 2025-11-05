@@ -1,0 +1,13 @@
+{
+  "folders": [
+    { "path": "." }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": ".venv\\Scripts\\python.exe",
+    "python.analysis.extraPaths": ["${workspaceFolder}"],
+    "python.envFile": "${workspaceFolder}\\.env",
+    "terminal.integrated.env.windows": { "PYTHONPATH": "${workspaceFolder}" },
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.indexing": true
+  }
+}

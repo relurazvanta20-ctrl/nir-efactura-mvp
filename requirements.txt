@@ -1,0 +1,7 @@
+streamlit
+lxml
+xmltodict
+pydantic
+pytest
+pandas
+xlsxwriter
