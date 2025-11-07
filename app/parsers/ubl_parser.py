@@ -1,140 +1,181 @@
-from typing import Any, Dict, List, Optional
+from __future__ import annotations
+from typing import Any, Dict, List
 
-def _get(d: Dict, *keys):
-    for k in keys:
-        if k in d:
-            return d[k]
-    return None
+# --- utilitare simple ---
+def _get(d: Any, path: str, default=None):
+    """
+    Navighează în dict/list după o cale cu puncte.
+    Suportă chei cu namespace UBL (cbc:, cac:).
+    Dacă întâlnește listă, ia primul element.
+    """
+    cur = d
+    for p in path.split("."):
+        if cur is None:
+            return default
+        if isinstance(cur, list):
+            cur = cur[0] if cur else None
+        if isinstance(cur, dict):
+            cur = cur.get(p)
+        else:
+            return default
+    return default if cur is None else cur
 
-def _norm_list(x):
-    if x is None:
-        return []
-    if isinstance(x, list):
-        return x
-    return [x]
-
-def try_float(x) -> Optional[float]:
-    if x is None:
-        return None
+def _as_float(x) -> float:
     try:
-        return float(x)
+        return float(str(x).replace(",", "."))
     except Exception:
-        try:
-            return float(str(x))
-        except Exception:
-            return None
+        return 0.0
 
-def _line_vat_percent(line: Dict) -> Optional[float]:
+# --- parser principal ---
+def parse_invoice_minimal(doc: dict) -> Dict[str, Any]:
     """
-    Caută procentul TVA pe linie:
-    cac:InvoiceLine -> cac:TaxTotal -> cac:TaxSubtotal -> cbc:Percent
-    (în unele fișiere poate lipsi sau fi la nivel agregat)
+    Primește dict din xmltodict.parse pentru un UBL 2.1/RO_CIUS.
+    Returnează:
+      {
+        id, issue_date, currency,
+        supplier: {name, cui, address},
+        buyer:    {name, cui, address},
+        totals:   {net, vat, gross, payable, calc_net_from_lines, calc_vat_from_lines},
+        lines:    [{name, qty, unit, price, line_net, vat_pct}],
+        validations: [ {level,msg}, ... ]
+      }
     """
-    tax_total = _get(line, "cac:TaxTotal", "TaxTotal") or {}
-    subs = _norm_list(_get(tax_total, "cac:TaxSubtotal", "TaxSubtotal"))
-    for s in subs:
-        pct = _get(s, "cbc:Percent", "Percent")
-        if pct is not None:
-            return try_float(pct)
-    return None
+    inv = doc.get("Invoice") or doc  # în XML-ul tău rădăcina este "Invoice"
 
-def parse_invoice_minimal(data: Dict[str, Any]) -> Dict[str, Any]:
-    invoice = data.get("Invoice", {})
-    # Header
-    inv_id = _get(invoice, "cbc:ID", "ID")
-    issue_date = _get(invoice, "cbc:IssueDate", "IssueDate")
-    currency = _get(invoice, "cbc:DocumentCurrencyCode", "DocumentCurrencyCode")
+    # --- header ---
+    inv_id     = _get(inv, "cbc:ID") or _get(inv, "ID") or ""
+    issue_date = _get(inv, "cbc:IssueDate") or _get(inv, "IssueDate") or ""
+    currency   = _get(inv, "cbc:DocumentCurrencyCode") or _get(inv, "DocumentCurrencyCode") or "RON"
 
-    # Linii
-    lines_raw = _get(invoice, "cac:InvoiceLine", "InvoiceLine")
-    lines_raw = _norm_list(lines_raw)
+    # --- supplier ---
+    sp = _get(inv, "cac:AccountingSupplierParty") or _get(inv, "AccountingSupplierParty") or {}
+    sp_party = _get(sp, "cac:Party") or _get(sp, "Party") or {}
+    sp_name  = (
+        _get(sp_party, "cac:PartyName.cbc:Name") or
+        _get(sp_party, "PartyName.cbc:Name") or
+        _get(sp_party, "PartyName.Name") or
+        "-"
+    )
+    sp_cui   = (
+        _get(sp_party, "cac:PartyTaxScheme.cbc:CompanyID") or
+        _get(sp_party, "PartyTaxScheme.cbc:CompanyID") or
+        _get(sp_party, "PartyTaxScheme.CompanyID") or
+        "-"
+    )
+    sp_addr  = _compose_address(sp_party)
 
-    parsed_lines: List[Dict[str, Any]] = []
-    sum_lines_net = 0.0
-    sum_vat_calc = 0.0
+    # --- buyer ---
+    bp = _get(inv, "cac:AccountingCustomerParty") or _get(inv, "AccountingCustomerParty") or {}
+    bp_party = _get(bp, "cac:Party") or _get(bp, "Party") or {}
+    bp_name  = (
+        _get(bp_party, "cac:PartyName.cbc:Name") or
+        _get(bp_party, "PartyName.cbc:Name") or
+        _get(bp_party, "PartyName.Name") or
+        "-"
+    )
+    bp_cui   = (
+        _get(bp_party, "cac:PartyTaxScheme.cbc:CompanyID") or
+        _get(bp_party, "PartyTaxScheme.cbc:CompanyID") or
+        _get(bp_party, "PartyTaxScheme.CompanyID") or
+        "-"
+    )
+    bp_addr  = _compose_address(bp_party)
 
-    for ln in lines_raw:
-        item = _get(ln, "cac:Item", "Item") or {}
-        name = _get(item, "cbc:Name", "Name")
+    # --- linii ---
+    raw_lines = _get(inv, "cac:InvoiceLine") or _get(inv, "InvoiceLine") or []
+    if isinstance(raw_lines, dict):
+        raw_lines = [raw_lines]
 
-        qty = _get(ln, "cbc:InvoicedQuantity", "InvoicedQuantity")
-        unit = None
-        if isinstance(qty, dict):
-            unit = qty.get("@unitCode") or qty.get("unitCode")
-            qty = qty.get("#text") or qty.get("value") or qty
-        qty = try_float(qty)
+    lines: List[Dict[str, Any]] = []
+    for ln in raw_lines:
+        # name
+        name = (
+            _get(ln, "cac:Item.cbc:Name") or
+            _get(ln, "Item.cbc:Name") or
+            _get(ln, "Item.Name") or
+            "-"
+        )
+        # qty + unit
+        qty  = _as_float(_get(ln, "cbc:InvoicedQuantity") or _get(ln, "cbc:InvoicedQuantity.#text") or _get(ln, "InvoicedQuantity.#text") or _get(ln, "InvoicedQuantity"))
+        unit = (
+            _get(ln, "cbc:InvoicedQuantity.@unitCode") or
+            _get(ln, "InvoicedQuantity.@unitCode") or
+            ""
+        )
+        # price
+        price = _as_float(
+            _get(ln, "cac:Price.cbc:PriceAmount") or
+            _get(ln, "cac:Price.cbc:PriceAmount.#text") or
+            _get(ln, "Price.cbc:PriceAmount") or
+            _get(ln, "Price.PriceAmount")
+        )
+        # line net (dacă lipsește, qty*price)
+        line_net = _as_float(
+            _get(ln, "cbc:LineExtensionAmount") or
+            _get(ln, "cbc:LineExtensionAmount.#text") or
+            _get(ln, "LineExtensionAmount")
+        )
+        if not line_net and qty and price:
+            line_net = round(qty * price, 2)
 
-        price = _get(_get(ln, "cac:Price", "Price") or {}, "cbc:PriceAmount", "PriceAmount")
-        price = try_float(price)
+        # VAT %
+        vat_pct = _as_float(
+            _get(ln, "cac:TaxTotal.cac:TaxSubtotal.cbc:Percent") or
+            _get(ln, "TaxTotal.TaxSubtotal.Percent") or
+            0
+        )
 
-        # valoarea liniei fără TVA (LineExtensionAmount) – dacă există
-        line_ext = _get(ln, "cbc:LineExtensionAmount", "LineExtensionAmount")
-        line_ext = try_float(line_ext)
-
-        # TVA %
-        vat_pct = _line_vat_percent(ln)
-
-        # calcule rapide (dacă lipsesc unele câmpuri, aproximăm din qty * price)
-        if line_ext is None and (qty is not None and price is not None):
-            line_ext = round(qty * price, 2)
-
-        if line_ext is not None:
-            sum_lines_net += line_ext
-
-        if vat_pct is not None and line_ext is not None:
-            sum_vat_calc += round(line_ext * vat_pct / 100.0, 2)
-
-        parsed_lines.append({
+        lines.append({
             "name": name,
             "qty": qty,
             "unit": unit,
             "price": price,
-            "line_net": line_ext,
+            "line_net": line_net,
             "vat_pct": vat_pct,
         })
 
-    # Totaluri din header (dacă există)
-    tax_total = _get(invoice, "cac:TaxTotal", "TaxTotal") or {}
-    tax_amount = _get(tax_total, "cbc:TaxAmount", "TaxAmount")
-    tax_amount = try_float(tax_amount)
+    # --- totaluri din XML ---
+    tax_total = _get(inv, "cac:TaxTotal") or _get(inv, "TaxTotal") or {}
+    legal_tot = _get(inv, "cac:LegalMonetaryTotal") or _get(inv, "LegalMonetaryTotal") or {}
 
-    legal_total = _get(invoice, "cac:LegalMonetaryTotal", "LegalMonetaryTotal") or {}
-    total_net = try_float(_get(legal_total, "cbc:TaxExclusiveAmount", "TaxExclusiveAmount"))
-    total_gross = try_float(_get(legal_total, "cbc:TaxInclusiveAmount", "TaxInclusiveAmount"))
-    payable = try_float(_get(legal_total, "cbc:PayableAmount", "PayableAmount"))
+    net     = _as_float(_get(legal_tot, "cbc:TaxExclusiveAmount") or _get(legal_tot, "TaxExclusiveAmount"))
+    gross   = _as_float(_get(legal_tot, "cbc:TaxInclusiveAmount") or _get(legal_tot, "TaxInclusiveAmount"))
+    payable = _as_float(_get(legal_tot, "cbc:PayableAmount") or _get(legal_tot, "PayableAmount"))
+    vat     = _as_float(_get(tax_total, "cbc:TaxAmount") or _get(tax_total, "TaxAmount"))
 
-    # Validări simple
+    # --- recalcul din linii ---
+    calc_net = round(sum(_as_float(l["line_net"]) for l in lines), 2)
+    calc_vat = round(sum(_as_float(l["line_net"]) * (_as_float(l["vat_pct"]) / 100.0) for l in lines), 2)
+
+    # --- validări simple ---
     validations = []
-    def add_warn(msg): validations.append({"level": "warn", "msg": msg})
-    def add_err(msg): validations.append({"level": "error", "msg": msg})
-
-    # 1) suma liniilor ≈ total fără TVA (dacă ambele prezente)
-    if total_net is not None and sum_lines_net is not None:
-        if abs(sum_lines_net - total_net) > 0.02:  # toleranță 2 bani
-            add_err(f"Suma liniilor (calc: {sum_lines_net}) diferă de TaxExclusiveAmount ({total_net}).")
-
-    # 2) TVA calculat din linii ≈ TVA raportat (dacă există ambele)
-    if tax_amount is not None and sum_vat_calc is not None and sum_vat_calc > 0:
-        if abs(sum_vat_calc - tax_amount) > 0.02:
-            add_err(f"TVA calculat din linii (calc: {sum_vat_calc}) diferă de TaxAmount ({tax_amount}).")
-
-    # 3) total brut ≈ net + TVA
-    if total_net is not None and tax_amount is not None and total_gross is not None:
-        if abs(total_net + tax_amount - total_gross) > 0.02:
-            add_err(f"TaxInclusiveAmount ({total_gross}) diferă de net+TVA ({total_net + tax_amount}).")
+    if not inv_id:
+        validations.append({"level": "warning", "msg": "Lipsește ID factură."})
+    if net and abs(calc_net - net) > 0.05:
+        validations.append({"level": "warning", "msg": f"Net din linii ({calc_net}) diferă de Net din XML ({net})."})
+    if vat and abs(calc_vat - vat) > 0.05:
+        validations.append({"level": "warning", "msg": f"TVA din linii ({calc_vat}) diferă de TVA din XML ({vat})."})
 
     return {
         "id": inv_id,
         "issue_date": issue_date,
         "currency": currency,
-        "lines": parsed_lines,
-        "totals": {
-            "net": total_net,
-            "vat": tax_amount,
-            "gross": total_gross,
-            "payable": payable,
-            "calc_net_from_lines": round(sum_lines_net, 2),
-            "calc_vat_from_lines": round(sum_vat_calc, 2),
+        "supplier": {"name": sp_name, "cui": sp_cui, "address": sp_addr},
+        "buyer":    {"name": bp_name, "cui": bp_cui, "address": bp_addr},
+        "totals":   {
+            "net": net, "vat": vat, "gross": gross, "payable": payable,
+            "calc_net_from_lines": calc_net, "calc_vat_from_lines": calc_vat
         },
+        "lines": lines,
         "validations": validations,
     }
+
+def _compose_address(party: dict) -> str:
+    addr = _get(party, "cac:PostalAddress") or _get(party, "PostalAddress") or {}
+    parts = [
+        _get(addr, "cbc:StreetName") or _get(addr, "StreetName"),
+        _get(addr, "cbc:CityName") or _get(addr, "CityName"),
+        _get(addr, "cbc:PostalZone") or _get(addr, "PostalZone"),
+        _get(addr, "cac:Country.cbc:IdentificationCode") or _get(addr, "Country.IdentificationCode"),
+    ]
+    return ", ".join([p for p in parts if p])
