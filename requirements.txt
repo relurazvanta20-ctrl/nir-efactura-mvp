@@ -5,3 +5,4 @@ pydantic
 pytest
 pandas
 xlsxwriter
+fpdf2
