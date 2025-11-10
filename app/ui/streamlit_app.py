@@ -69,11 +69,13 @@ else:
             line_net = float(line.get("line_net") or 0)
             vat_pct  = float(line.get("vat_pct") or 0)
 
-            # completăm ce lipsește
+            # --- Fallback-uri logice (ca în PDF) ---
             if line_net == 0 and qty > 0 and price > 0:
                 line_net = round(qty * price, 2)
             if price == 0 and qty > 0 and line_net > 0:
                 price = round(line_net / qty, 6)
+            if qty == 0 and line_net > 0 and price > 0:
+                qty = round(line_net / price, 6)
             if vat_pct == 0 and approx_vat_pct > 0:
                 vat_pct = round(approx_vat_pct, 2)
 
@@ -90,6 +92,7 @@ else:
                 "TVA (lei)": vat_val,
                 "Total (lei)": total,
             })
+
 
         df_nir = pd.DataFrame(rows)
         st.dataframe(df_nir, use_container_width=True)
@@ -167,39 +170,49 @@ else:
         # 9) Export Excel (formatat, cu antet)
         excel_buffer = BytesIO()
         with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
-            start_row = 5
-            df_nir.to_excel(writer, index=False, sheet_name="NIR", startrow=start_row)
+            ws_name = "NIR"
+            start_row = 6  # lăsăm spațiu pentru antetul deasupra
 
-            wb = writer.book
-            ws = writer.sheets["NIR"]
+        # scriem direct tabelul (cu headere) la start_row
+        df_nir.to_excel(writer, index=False, sheet_name=ws_name, startrow=start_row)
 
-            fmt_title = wb.add_format({"bold": True, "font_size": 14})
-            fmt_lbl   = wb.add_format({"bold": True})
-            fmt_num   = wb.add_format({"num_format": "#,##0.00"})
-            fmt_head  = wb.add_format({"bold": True, "bg_color": "#EEEEEE", "border": 1})
-            fmt_cell  = wb.add_format({"border": 1})
+        wb = writer.book
+        ws = writer.sheets[ws_name]
 
-            ws.write(0, 0, "NIR generat din e-Factura", fmt_title)
-            ws.write(2, 0, "Număr factură:", fmt_lbl); ws.write(2, 1, nir_data["invoice_id"])
-            ws.write(3, 0, "Dată factură:",  fmt_lbl); ws.write(3, 1, nir_data["invoice_date"])
-            ws.write(4, 0, "Monedă:",        fmt_lbl); ws.write(4, 1, inv.get("currency", ""))
+        fmt_title = wb.add_format({"bold": True, "font_size": 14})
+        fmt_lbl   = wb.add_format({"bold": True})
+        fmt_num   = wb.add_format({"num_format": "#,##0.00"})
+        fmt_cell  = wb.add_format({"border": 1})
+        fmt_head  = wb.add_format({"bold": True, "bg_color": "#EEEEEE", "border": 1})
 
-            for col_idx, col_name in enumerate(df_nir.columns):
-                ws.write(start_row, col_idx, col_name, fmt_head)
+        # meta sus
+        ws.write(0, 0, "NIR generat din e-Factura", fmt_title)
+        ws.write(2, 0, "Număr factură:", fmt_lbl); ws.write(2, 1, nir_data["invoice_id"])
+        ws.write(3, 0, "Dată factură:",  fmt_lbl); ws.write(3, 1, nir_data["invoice_date"])
+        ws.write(4, 0, "Monedă:",        fmt_lbl); ws.write(4, 1, inv.get("currency", ""))
 
-            # coloane numerice
-            for col in [2, 3, 4, 6, 7]:
-                ws.set_column(col, col, 14, fmt_num)
-            # text
-            ws.set_column(0, 0, 40, fmt_cell)  # Denumire
-            ws.set_column(1, 1, 10, fmt_cell)  # U.M.
+        # formatăm header-ul tabelului (rândul start_row)
+        for col_idx, col_name in enumerate(df_nir.columns):
+            ws.write(start_row, col_idx, col_name, fmt_head)
 
-            nrows, ncols = df_nir.shape
-            for r in range(start_row + 1, start_row + 1 + nrows):
-                for c in range(0, ncols):
-                    ws.write(r, c, df_nir.iloc[r - (start_row + 1), c], fmt_cell)
+        # formatare coloane
+        # Denumire
+        ws.set_column(0, 0, 40, fmt_cell)
+        # U.M.
+        ws.set_column(1, 1, 10, fmt_cell)
+        # Cant., Preț, Net, TVA (lei), Total (lei)
+        ws.set_column(2, 2, 12, fmt_num)
+        ws.set_column(3, 3, 14, fmt_num)
+        ws.set_column(4, 4, 14, fmt_num)
+        ws.set_column(6, 7, 14, fmt_num)
 
-            ws.freeze_panes(start_row + 1, 0)
+        # bordură pe corp (fără să rescriem valorile)
+        nrows, ncols = df_nir.shape
+        for r in range(start_row + 1, start_row + nrows + 1):
+            for c in range(0, ncols):
+                ws.write(r, c, df_nir.iloc[r - (start_row + 1), c], fmt_cell)
+
+        ws.freeze_panes(start_row + 1, 0)
 
         st.download_button(
             "Descarcă NIR (Excel)",
