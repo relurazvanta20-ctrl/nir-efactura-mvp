@@ -1,5 +1,6 @@
+# app/exporters/pdf_nir.py
 from __future__ import annotations
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List
 from fpdf import FPDF
 from datetime import datetime
 import os
@@ -16,22 +17,21 @@ FAMILY      = "DejaVu"
 MARGIN_L = 12
 MARGIN_R = 12
 MARGIN_T = 12
-MARGIN_B = 15
+MARGIN_B = 18  # ușor mai mare ca să încapă footerul
 
-# Coloane (mm) pentru landscape A4 (297mm lățime brută)
+# Coloane (mm) pentru A4 landscape (297mm lățime brută)
 # [Denumire, UM, Cant., Preț, TVA%, Total (cu TVA)]
-COL_WIDTHS = [150, 16, 20, 26, 14, 30]  # total 256mm (rămâne spațiu de margini confortabil)
+COL_WIDTHS = [150, 16, 20, 26, 14, 30]  # total ~256mm în interiorul marginilor
 HEADERS    = ["Denumire", "UM", "Cant.", "Preț unitar", "TVA%", "Valoare (cu TVA)"]
 
 # Dimensiuni text
-TABLE_FONT_SIZE   = 9       # text din tabel
-HEADER_FONT_SIZE  = 10      # text cap tabel
-TITLE_FONT_SIZE   = 14      # titlul mare de sus
-INFO_FONT_SIZE    = 10      # infouri (furnizor/cumpărător)
-LINE_H            = 5.6     # înălțime pe linie în tabel
-HEADER_LINE_H     = 5.6     # înălțime pe linie în headerul tabelului
-PAD_X             = 1.6     # padding orizontal în celule
-
+TABLE_FONT_SIZE   = 9
+HEADER_FONT_SIZE  = 10
+TITLE_FONT_SIZE   = 14
+INFO_FONT_SIZE    = 10
+LINE_H            = 5.6
+HEADER_LINE_H     = 5.6
+PAD_X             = 1.6
 
 # ========================== Utilitare ==========================
 def coalesce(*vals, default=0.0) -> float:
@@ -53,15 +53,15 @@ def fmt_float(x: Any, nd=2) -> str:
         return f"{0:.{nd}f}"
 
 def tokenize_for_wrap(text: str) -> List[str]:
-    # Rupe după spații + delimitatori care ajută la wrap
     if not text:
         return [""]
+    # Rupe după spații și delimitatori utili la wrap
     return re.findall(r"[^\s/\-\(\),\.]+|[/\-\(\),\.]", str(text))
 
 def wrap_text_to_width(pdf: FPDF, text: str, width: float) -> List[str]:
-    """Împarte textul în linii care încap în lățimea 'width'.
-       Rupe și tokenuri prea lungi la nivel de caracter."""
-    tokens = tokenize_for_wrap(text)
+    """Împarte textul pe linii care încap în 'width'. Rupe și pe delimitatori; dacă
+    un token e prea lung, îl rupe la nivel de caractere."""
+    tokens: List[str] = tokenize_for_wrap(text)
     lines: List[str] = []
     cur = ""
 
@@ -92,7 +92,6 @@ def wrap_text_to_width(pdf: FPDF, text: str, width: float) -> List[str]:
         lines.append(cur)
     return [ln.strip() for ln in lines]
 
-
 # ========================== Clasa PDF ==========================
 class NirPDF(FPDF):
     def __init__(self, *args, **kwargs):
@@ -111,10 +110,10 @@ class NirPDF(FPDF):
 
     # ---- Footer pagină ----
     def footer(self):
-        self.set_y(-12)
+        # păstrăm doar paginare și moment generare; footer-ul cu comisia îl desenăm din corp
+        self.set_y(-10)
         self.set_font(FAMILY, "", 8)
-        self.cell(0, 8, f"Pagina {self.page_no()}    •    Generat la {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                  align="R")
+        self.cell(0, 8, f"Pagina {self.page_no()} • Generat la {datetime.now().strftime('%Y-%m-%d %H:%M')}", align="R")
 
     # ---- Header tabel multi-linie (fără overflow) ----
     def _draw_table_header(self):
@@ -124,7 +123,7 @@ class NirPDF(FPDF):
         wrapped = []
         max_lines = 1
         for w, text in zip(self.col_w, self.headers):
-            box_w = max(0.0, w - 2*PAD_X)
+            box_w = max(0.0, w - 2 * PAD_X)
             lines = wrap_text_to_width(self, text, box_w)
             wrapped.append((w, lines, box_w))
             max_lines = max(max_lines, len(lines))
@@ -144,25 +143,26 @@ class NirPDF(FPDF):
         x = x_left
         for col_idx, (w, lines, box_w) in enumerate(wrapped):
             align  = "L" if col_idx == 0 else "C"
-            y_text = y_top + (header_h - len(lines)*HEADER_LINE_H)/2.0
+            y_text = y_top + (header_h - len(lines) * HEADER_LINE_H) / 2.0
             for i, ln_text in enumerate(lines):
-                self.set_xy(x + PAD_X, y_text + i*HEADER_LINE_H)
+                self.set_xy(x + PAD_X, y_text + i * HEADER_LINE_H)
                 self.cell(box_w, HEADER_LINE_H, ln_text, ln=0, align=align)
             x += w
 
         self.set_xy(x_left, y_top + header_h)
 
-    # ---- asigură spațiu pentru rând; altfel, rupe pagina și re-desenază headerul ----
     def ensure_space(self, row_h: float):
-        if self.get_y() + row_h > self.page_break_trigger:
-            self.add_page()   # header() se va ocupa de redesenarea headerului de tabel
-
+        """Dacă rândul nu încape, rupe pagina și redesenează headerul tabelului."""
+        # păstrăm o „zonă tampon” de 12 mm ca să nu călcăm peste footerul de o linie
+        buffer_zone = 12
+        if self.get_y() + row_h > (self.page_break_trigger - buffer_zone):
+            self.add_page()  # header() redesenează capul tabelului
 
 # ========================== Desen rând tabel ==========================
 def draw_row(pdf: NirPDF, row: Dict[str, Any], line_h: float = LINE_H):
     pdf.set_font(FAMILY, "", TABLE_FONT_SIZE)
 
-    # Extrage câmpuri + derive simple (fără „presupuneri”)
+    # Extrage câmpuri + derive simple
     name      = str(row.get("name", "") or "")
     unit      = str(row.get("unit", "") or "")
     qty       = coalesce(row.get("qty"))
@@ -172,46 +172,44 @@ def draw_row(pdf: NirPDF, row: Dict[str, Any], line_h: float = LINE_H):
     total     = coalesce(row.get("total"))
 
     if total == 0.0 and line_net > 0:
-        total = round(line_net * (1.0 + vat_pct/100.0), 2)
+        total = round(line_net * (1.0 + vat_pct / 100.0), 2)
     if line_net == 0.0 and qty > 0 and price > 0:
         line_net = round(qty * price, 2)
 
-    # Pregătește text pentru coloane scurte
     unit_txt  = unit
     qty_txt   = fmt_float(qty, 2)
     price_txt = fmt_float(price, 2)
     vat_txt   = fmt_float(vat_pct, 0)
     total_txt = fmt_float(total, 2)
 
-    # Wrap pentru Denumire
-    name_w   = max(0.0, pdf.col_w[0] - 2*PAD_X)
+    # Wrap pentru „Denumire”
+    name_w   = max(0.0, pdf.col_w[0] - 2 * PAD_X)
     name_ln  = wrap_text_to_width(pdf, name, name_w)
     n_lines  = max(1, len(name_ln))
     row_h    = n_lines * line_h
 
-    # Page-break dacă nu încape rândul
+    # Page-break dacă nu încape rândul (cu buffer pentru footer)
     pdf.ensure_space(row_h)
 
     # Coordonate
     x0 = pdf.get_x()
     y0 = pdf.get_y()
 
-    # Desenăm întâi bordurile (rect) pentru întreg rândul
+    # Borduri pentru rând
     x = x0
     for w in pdf.col_w:
         pdf.rect(x, y0, w, row_h)
         x += w
 
-    # Scriem textul în interiorul fiecărei celule
-    # 1) Denumire (multi-linie)
-    pdf.set_xy(x0 + PAD_X, y0)
+    # Text în celule
+    # 1) Denumire multi-linie
     for i, ln in enumerate(name_ln):
-        pdf.set_xy(x0 + PAD_X, y0 + i*line_h)
+        pdf.set_xy(x0 + PAD_X, y0 + i * line_h)
         pdf.cell(name_w, line_h, ln, ln=0, align="L")
 
-    # 2) Restul coloanelor (o linie, centrat vertical)
+    # 2) Restul (o linie, centrat vertical)
     def write_cell(x_left: float, w: float, text: str, align="R"):
-        y_text = y0 + (row_h - line_h)/2.0
+        y_text = y0 + (row_h - line_h) / 2.0
         pdf.set_xy(x_left, y_text)
         pdf.cell(w, line_h, text, ln=0, align=align)
 
@@ -222,9 +220,39 @@ def draw_row(pdf: NirPDF, row: Dict[str, Any], line_h: float = LINE_H):
     write_cell(x,                pdf.col_w[4], vat_txt,   align="C"); x += pdf.col_w[4]
     write_cell(x,                pdf.col_w[5], total_txt, align="R")
 
-    # Mută cursorul la următorul rând
     pdf.set_xy(x0, y0 + row_h)
 
+# ========================== Footer pe o singură linie ==========================
+def draw_footer_single_line(pdf: NirPDF, inv_date: str):
+    """
+    Footer pe o singură linie — tot textul uniform, fără bold, fără diferențe de font.
+    Cu spațiere proporțională pentru a nu se suprapune.
+    """
+    y = pdf.h - pdf.b_margin - 8
+    pdf.set_y(y)
+
+    # poziție inițială ușor spre dreapta pentru aerisire
+    x = pdf.l_margin + 12
+    fs = 10  # font uniform
+
+    pdf.set_font(FAMILY, "", fs)
+
+    # segmente ordonate și lățimi calibrate pentru A4 landscape
+    segments = [
+        ("Comisia de recepție", 40),
+        ("Nume + prenume",      50),
+        ("Semnătura",           35),
+        ("Data",                20),
+        (inv_date or "",        28),
+        ("",                    16),  # spațiu gol între blocuri
+        ("Primit în gestiune",  46),
+        ("Semnătura",           35),
+    ]
+
+    for text, w in segments:
+        pdf.set_xy(x, y)
+        pdf.cell(w, 6, text, ln=0, align="L")
+        x += w
 
 # ========================== Generator principal ==========================
 def generate_pdf(nir_data: Dict[str, Any]) -> bytes:
@@ -241,13 +269,12 @@ def generate_pdf(nir_data: Dict[str, Any]) -> bytes:
       "totals": { "subtotal":..., "vat":..., "grand_total":... }
     }
     """
-
     # 1) Inițializare PDF în LANDSCAPE A4
     pdf = NirPDF(orientation="L", unit="mm", format="A4")
     pdf.set_margins(MARGIN_L, MARGIN_T, MARGIN_R)
     pdf.set_auto_page_break(auto=True, margin=MARGIN_B)
 
-    # 2) Fonturi Unicode (obligatoriu pentru diacritice)
+    # 2) Fonturi Unicode
     if os.path.isfile(REGULAR_TTF) and os.path.isfile(BOLD_TTF):
         pdf.add_font(FAMILY, "", REGULAR_TTF, uni=True)
         pdf.add_font(FAMILY, "B", BOLD_TTF,    uni=True)
@@ -284,18 +311,17 @@ def generate_pdf(nir_data: Dict[str, Any]) -> bytes:
     pdf.cell(0, 6, f"Nr. poziții: {len(items)}", ln=True)
     pdf.ln(1)
 
-    # 4) Tabel: pregătire pentru header pe fiecare pagină
+    # 4) Tabel produse
     pdf.in_table = True
     pdf._draw_table_header()
 
-    # 5) Rânduri
     pdf.set_font(FAMILY, "", TABLE_FONT_SIZE)
     for it in items:
         draw_row(pdf, it, line_h=LINE_H)
 
-    pdf.in_table = False  # de aici, headerul paginii nu va mai trage headerul de tabel
+    pdf.in_table = False
 
-    # 6) Totaluri (fallback defensiv)
+    # 5) Totaluri (fallback defensiv dacă lipsesc)
     totals   = nir_data.get("totals", {}) or {}
     subtotal = coalesce(totals.get("subtotal"))
     vat_sum  = coalesce(totals.get("vat"))
@@ -308,9 +334,9 @@ def generate_pdf(nir_data: Dict[str, Any]) -> bytes:
             rate   = coalesce(it.get("vat_pct"), it.get("vat"))
             gross  = coalesce(it.get("total"))
             if gross == 0.0:
-                gross = ln_net * (1.0 + rate/100.0) if ln_net > 0 else 0.0
+                gross = ln_net * (1.0 + rate / 100.0) if ln_net > 0 else 0.0
             s_net   += ln_net
-            s_vat   += ln_net * (rate/100.0)
+            s_vat   += ln_net * (rate / 100.0)
             s_gross += gross
         if subtotal == 0.0: subtotal = round(s_net, 2)
         if vat_sum  == 0.0: vat_sum  = round(s_vat, 2)
@@ -318,9 +344,14 @@ def generate_pdf(nir_data: Dict[str, Any]) -> bytes:
 
     pdf.ln(2)
     pdf.set_font(FAMILY, "B", INFO_FONT_SIZE + 1)
-    pdf.cell(0, 8,
-             f"Subtotal: {fmt_float(subtotal)}    |    TVA: {fmt_float(vat_sum)}    |    Total: {fmt_float(grand)}",
-             ln=True, align="R")
+    pdf.cell(
+        0, 8,
+        f"Subtotal: {fmt_float(subtotal)}    |    TVA: {fmt_float(vat_sum)}    |    Total: {fmt_float(grand)}",
+        ln=True, align="R"
+    )
+
+    # 6) Footer pe o singură linie (fără borduri/linie orizontală)
+    draw_footer_single_line(pdf, inv_date)
 
     # 7) Return bytes
     out = pdf.output(dest="S")

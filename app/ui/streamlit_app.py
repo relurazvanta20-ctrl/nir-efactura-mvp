@@ -1,251 +1,248 @@
 # app/ui/streamlit_app.py
+from __future__ import annotations
 
-import sys, os, re
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+import io
+import re
+from typing import Any, Dict, List
 
+import pandas as pd
 import streamlit as st
 import xmltodict
-import pandas as pd
-from io import BytesIO
 
+# parser + exportere
 from app.parsers.ubl_parser import parse_invoice_minimal
-from app.exporters.pdf_nir import generate_pdf  # necesită DejaVuSans.ttf/Bold în app/assets/fonts/
+from app.exporters.pdf_nir import generate_pdf
 
-st.set_page_config(page_title="NIR din e-Factura — MVP", layout="centered", page_icon="📄")
-st.title("NIR din e-Factura — MVP")
-st.caption("Încarci XML (UBL 2.1 / RO_CIUS) → vezi antet, totaluri, linii → exporți CSV/XLSX/PDF.")
 
-uploaded = st.file_uploader("Încarcă fișierul XML e-Factura", type=["xml"])
+# =============== helpers UI/format ===============
+def s(x: Any) -> str:
+    """safe string for UI"""
+    return str(x or "").strip()
 
-if uploaded is None:
-    st.info("Încarcă un fișier XML pentru a vedea preview.")
-else:
-    try:
-        # 1) Parse XML → dict
-        data = xmltodict.parse(uploaded.read())
-        inv = parse_invoice_minimal(data)
+def filename_safe_id(raw_id: str) -> str:
+    """ID sigur pentru nume de fișier (nu afectează afișarea)."""
+    cleaned = re.sub(r"[^\w\-.]+", "_", s(raw_id))
+    cleaned = cleaned.strip("_")
+    return cleaned or "invoice"
 
-        # 2) ID factură „safe” (nu depindem de o valoare fixă)
-        raw_id = (inv.get("id") or "").strip()
-        if not raw_id:
-            safe_id = "FARA-ID"
-        elif not re.match(r"^[A-Za-z0-9][A-Za-z0-9\-\_\/\.]*$", raw_id):
-            safe_id = f"ID_INVALID_{raw_id[:10]}"
-        else:
-            safe_id = raw_id
+def to_nir_df(inv: Dict[str, Any]) -> pd.DataFrame:
+    """Construiește DataFrame-ul NIR din payload-ul parserului (fără invenții)."""
+    rows = []
+    for ln in inv.get("lines", []):
+        qty      = float(ln.get("qty") or 0)
+        price    = float(ln.get("price") or 0)
+        line_net = float(ln.get("line_net") or (qty * price))
+        vat_pct  = float(ln.get("vat_pct") or 0)
 
-        # 3) Header
-        st.subheader("Header")
-        st.write({
-            "ID": safe_id,
-            "IssueDate": inv.get("issue_date"),
-            "Currency": inv.get("currency"),
-            "LineCount": len(inv.get("lines", [])),
+        vat_lei   = round(line_net * vat_pct / 100.0, 2)
+        total_lei = round(line_net + vat_lei, 2)
+
+        rows.append({
+            "Denumire": s(ln.get("name")),
+            "UM":       s(ln.get("unit")),
+            "Cant.":    round(qty, 2),
+            "Preț unitar": round(price, 2),
+            "Valoare netă": round(line_net, 2),
+            "TVA %":    round(vat_pct, 2),
+            "TVA (lei)": vat_lei,
+            "Valoare (cu TVA)": total_lei,
         })
-
-        # 4) Totaluri din XML (și comparativ cu ce calculăm noi)
-        totals_xml = inv.get("totals", {}) or {}
-        st.subheader("Totaluri din XML")
-        st.write({
-            "TaxExclusiveAmount": totals_xml.get("net"),
-            "TaxAmount": totals_xml.get("vat"),
-            "TaxInclusiveAmount": totals_xml.get("gross"),
-            "PayableAmount": totals_xml.get("payable"),
-        })
-
-        # 5) Mini NIR (completăm inteligent lipsurile)
-        st.subheader("Mini NIR")
-
-        rows = []
-        xml_net = float(totals_xml.get("net") or 0)
-        xml_vat = float(totals_xml.get("vat") or 0)
-        approx_vat_pct = (xml_vat / xml_net * 100.0) if (xml_net > 0) else 0.0
-
-        for line in inv.get("lines", []):
-            qty      = float(line.get("qty") or 0)
-            price    = float(line.get("price") or 0)
-            line_net = float(line.get("line_net") or 0)
-            vat_pct  = float(line.get("vat_pct") or 0)
-
-            # --- Fallback-uri logice (ca în PDF) ---
-            if line_net == 0 and qty > 0 and price > 0:
-                line_net = round(qty * price, 2)
-            if price == 0 and qty > 0 and line_net > 0:
-                price = round(line_net / qty, 6)
-            if qty == 0 and line_net > 0 and price > 0:
-                qty = round(line_net / price, 6)
-            if vat_pct == 0 and approx_vat_pct > 0:
-                vat_pct = round(approx_vat_pct, 2)
-
-            vat_val = round(line_net * vat_pct / 100.0, 2)
-            total   = round(line_net + vat_val, 2)
-
-            rows.append({
-                "Denumire": line.get("name"),
-                "U.M.": line.get("unit"),
-                "Cant.": qty,
-                "Preț unitar": price,
-                "Valoare netă": line_net,
-                "TVA %": vat_pct,
-                "TVA (lei)": vat_val,
-                "Total (lei)": total,
-            })
+    df = pd.DataFrame(rows, columns=[
+        "Denumire", "UM", "Cant.", "Preț unitar", "Valoare netă",
+        "TVA %", "TVA (lei)", "Valoare (cu TVA)"
+    ])
+    return df
 
 
-        df_nir = pd.DataFrame(rows)
-        st.dataframe(df_nir, use_container_width=True)
+def render_totals(inv: Dict[str, Any]):
+    t = inv.get("totals", {}) or {}
+    col1, col2, col3, col4 = st.columns([1,1,1,1])
+    col1.metric("Subtotal (TaxExclusiveAmount)", f"{t.get('net', 0):,.2f}")
+    col2.metric("TVA (TaxAmount)", f"{t.get('vat', 0):,.2f}")
+    col3.metric("Total (TaxInclusiveAmount)", f"{t.get('gross', 0):,.2f}")
+    col4.metric("De plată (PayableAmount)", f"{t.get('payable', 0):,.2f}")
 
-        # 6) Totaluri (recalcul din tabel)
-        sum_net   = round(df_nir["Valoare netă"].sum(), 2) if not df_nir.empty else 0.0
-        sum_vat   = round(df_nir["TVA (lei)"].sum(), 2)    if not df_nir.empty else 0.0
-        sum_total = round(df_nir["Total (lei)"].sum(), 2)  if not df_nir.empty else 0.0
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total net",   f"{sum_net:,.2f} RON")
-        c2.metric("TVA total",   f"{sum_vat:,.2f} RON")
-        c3.metric("Total cu TVA",f"{sum_total:,.2f} RON")
-
-        # 7) nir_data = o singură sursă pentru toate exporturile
-        supplier = inv.get("supplier", {}) or {}
-        buyer    = inv.get("buyer", {}) or {}
-
-                # --- items_list pentru exporturi (inclusiv PDF) ---
-        items_list = []
-        for _, row in df_nir.iterrows():
-            qty = float(row["Cant."])
-            price = float(row["Preț unitar"])
-            line_net = float(row["Valoare netă"])
-            vat_pct = float(row["TVA %"])
-            total = float(row["Total (lei)"])
-
-            # Fallback-uri sigure (în caz că pe viitor unele coloane vin 0)
-            if line_net == 0 and qty > 0 and price > 0:
-                line_net = round(qty * price, 2)
-            if price == 0 and qty > 0 and line_net > 0:
-                price = round(line_net / qty, 6)
-            if total == 0 and line_net > 0:
-                total = round(line_net * (1 + vat_pct / 100.0), 2)
-
-            items_list.append({
-                "name":  str(row["Denumire"]),
-                "qty":   float(qty),
-                "unit":  str(row["U.M."]),
-                "price": float(price),
-                "vat":   float(vat_pct),
-                "line_net": float(line_net),      # <— important pentru PDF
-                "total": float(total),
-            })
-
-        nir_data = {
-            "invoice_id":   safe_id,
-            "invoice_date": str(inv.get("issue_date", "")),
-            "supplier": {
-                "name":    supplier.get("name", "-"),
-                "cui":     supplier.get("cui", "-"),
-                "address": supplier.get("address", "-"),
-            },
-            "buyer": {
-                "name":    buyer.get("name", "-"),
-                "cui":     buyer.get("cui", "-"),
-                "address": buyer.get("address", "-"),
-            },
-            "items":  items_list,
-            "totals": {
-                "subtotal":    float(sum_net),
-                "vat":         float(sum_vat),
-                "grand_total": float(sum_total),
-            }
-        }
-
-        # 8) Export CSV
-        st.download_button(
-            "Descarcă tabel (CSV)",
-            data=df_nir.to_csv(index=False).encode("utf-8-sig"),
-            file_name="nir.csv",
-            mime="text/csv"
+    # diferențe din linii vs antet
+    calc_net = float(t.get("calc_net_from_lines") or 0)
+    calc_vat = float(t.get("calc_vat_from_lines") or 0)
+    if abs(calc_net - float(t.get("net") or 0)) > 0.05 or abs(calc_vat - float(t.get("vat") or 0)) > 0.05:
+        st.warning(
+            f"Diferențe între linii și antet: Net linii = {calc_net:.2f}, TVA linii = {calc_vat:.2f}"
         )
 
-        # 9) Export Excel (formatat, cu antet)
-        excel_buffer = BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
-            ws_name = "NIR"
-            start_row = 6  # lăsăm spațiu pentru antetul deasupra
 
-        # scriem direct tabelul (cu headere) la start_row
-        df_nir.to_excel(writer, index=False, sheet_name=ws_name, startrow=start_row)
+def export_xlsx(df: pd.DataFrame, nir_data: Dict[str, Any], invoice_id_file: str):
+    """Generează și oferă la descărcare Excel-ul (XLSX)."""
+    excel_buffer = io.BytesIO()
 
+    with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
+        ws_name = "NIR"
+        start_row = 6
+
+        df.to_excel(writer, index=False, sheet_name=ws_name, startrow=start_row)
         wb = writer.book
         ws = writer.sheets[ws_name]
 
+        # formate
         fmt_title = wb.add_format({"bold": True, "font_size": 14})
         fmt_lbl   = wb.add_format({"bold": True})
-        fmt_num   = wb.add_format({"num_format": "#,##0.00"})
-        fmt_cell  = wb.add_format({"border": 1})
         fmt_head  = wb.add_format({"bold": True, "bg_color": "#EEEEEE", "border": 1})
+        fmt_cell  = wb.add_format({"border": 1})
+        fmt_num   = wb.add_format({"num_format": "#,##0.00", "border": 1})
+        fmt_pct   = wb.add_format({"num_format": "0.00", "border": 1})
 
         # meta sus
         ws.write(0, 0, "NIR generat din e-Factura", fmt_title)
-        ws.write(2, 0, "Număr factură:", fmt_lbl); ws.write(2, 1, nir_data["invoice_id"])
-        ws.write(3, 0, "Dată factură:",  fmt_lbl); ws.write(3, 1, nir_data["invoice_date"])
-        ws.write(4, 0, "Monedă:",        fmt_lbl); ws.write(4, 1, inv.get("currency", ""))
+        ws.write(2, 0, "Număr factură:", fmt_lbl); ws.write(2, 1, s(nir_data.get("invoice_id")))
+        ws.write(3, 0, "Dată factură:",  fmt_lbl); ws.write(3, 1, s(nir_data.get("invoice_date")))
+        ws.write(4, 0, "Monedă:",        fmt_lbl); ws.write(4, 1, s(inv_payload.get("currency")))
 
-        # formatăm header-ul tabelului (rândul start_row)
-        for col_idx, col_name in enumerate(df_nir.columns):
-            ws.write(start_row, col_idx, col_name, fmt_head)
+        # reformatăm header-ul
+        for c, col in enumerate(df.columns):
+            ws.write(start_row, c, col, fmt_head)
 
-        # formatare coloane
-        # Denumire
-        ws.set_column(0, 0, 40, fmt_cell)
-        # U.M.
-        ws.set_column(1, 1, 10, fmt_cell)
-        # Cant., Preț, Net, TVA (lei), Total (lei)
-        ws.set_column(2, 2, 12, fmt_num)
-        ws.set_column(3, 3, 14, fmt_num)
-        ws.set_column(4, 4, 14, fmt_num)
-        ws.set_column(6, 7, 14, fmt_num)
+        # lățimi coloane
+        ws.set_column(0, 0, 60, fmt_cell)  # Denumire
+        ws.set_column(1, 1, 8,  fmt_cell)  # UM
+        ws.set_column(2, 2, 12, fmt_num)   # Cant.
+        ws.set_column(3, 3, 14, fmt_num)   # Preț unitar
+        ws.set_column(4, 4, 14, fmt_num)   # Valoare netă
+        ws.set_column(5, 5, 8,  fmt_pct)   # TVA %
+        ws.set_column(6, 7, 14, fmt_num)   # TVA (lei), Valoare (cu TVA)
 
-        # bordură pe corp (fără să rescriem valorile)
-        nrows, ncols = df_nir.shape
+        # borduri pe corp (opțional)
+        nrows, ncols = df.shape
         for r in range(start_row + 1, start_row + nrows + 1):
-            for c in range(0, ncols):
-                ws.write(r, c, df_nir.iloc[r - (start_row + 1), c], fmt_cell)
+            for c in range(ncols):
+                v = df.iloc[r - (start_row + 1), c]
+                ws.write(r, c, v, fmt_num if isinstance(v, (int, float, float)) else fmt_cell)
 
         ws.freeze_panes(start_row + 1, 0)
 
-        st.download_button(
-            "Descarcă NIR (Excel)",
-            data=excel_buffer.getvalue(),
-            file_name=f"NIR_{nir_data['invoice_id']}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    excel_buffer.seek(0)
+    st.download_button(
+        "Descarcă NIR (Excel)",
+        data=excel_buffer.getvalue(),
+        file_name=f"NIR_{invoice_id_file}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_xlsx",
+    )
 
-        # 10) Export PDF (fonturi Unicode setate în app/exporters/pdf_nir.py)
+
+# =============== UI ===============
+st.set_page_config(page_title="NIR e-Factura — MVP", layout="wide")
+st.title("NIR e-Factura — MVP")
+
+st.caption("Încarcă XML UBL (e-Factura) → parser → NIR → export PDF / Excel")
+
+uploaded = st.file_uploader("Încarcă fișier XML", type=["xml"])
+
+if uploaded is None:
+    st.info("Încarcă un fișier e-Factura (UBL XML) pentru a începe.")
+    st.stop()
+
+try:
+    # 1) parse XML
+    xml_bytes = uploaded.read()
+    doc = xmltodict.parse(xml_bytes)
+    inv_payload = parse_invoice_minimal(doc)
+
+    # 2) ID: Afișare vs. Nume fișier
+    invoice_id_display = s(inv_payload.get("id")) or "N/A"
+    invoice_id_file    = filename_safe_id(invoice_id_display)
+
+    # 3) layout info
+    info_col1, info_col2, info_col3 = st.columns([1,1,1])
+    with info_col1:
+        st.subheader("Factura")
+        st.write(f"**Număr:** {invoice_id_display}")
+        st.write(f"**Data:** {s(inv_payload.get('issue_date'))}")
+        st.write(f"**Monedă:** {s(inv_payload.get('currency'))}")
+
+    with info_col2:
+        sp = inv_payload.get("supplier") or {}
+        st.subheader("Furnizor")
+        st.write(s(sp.get("name")) or "-")
+        st.write(f"CUI: {s(sp.get('cui')) or '-'}")
+        st.write(s(sp.get("address")) or "-")
+
+    with info_col3:
+        bp = inv_payload.get("buyer") or {}
+        st.subheader("Cumpărător")
+        st.write(s(bp.get("name")) or "-")
+        st.write(f"CUI: {s(bp.get('cui')) or '-'}")
+        st.write(s(bp.get("address")) or "-")
+
+    st.divider()
+
+    # 4) totaluri + validări
+    render_totals(inv_payload)
+    vlist = inv_payload.get("validations") or []
+    if vlist:
+        with st.expander("Validări"):
+            for v in vlist:
+                lvl = s(v.get("level")).lower()
+                msg = s(v.get("msg"))
+                if lvl == "error":
+                    st.error(msg)
+                elif lvl == "warning":
+                    st.warning(msg)
+                else:
+                    st.info(msg)
+
+    # 5) tabel NIR
+    df_nir = to_nir_df(inv_payload)
+    st.subheader("Tabel NIR")
+    st.dataframe(df_nir, use_container_width=True, hide_index=True)
+
+    # 6) exporturi
+    # pregătim payload-ul pentru PDF (nomenclatorul cheilor este cel așteptat de generate_pdf)
+    items_for_pdf: List[Dict[str, Any]] = []
+    for _, r in df_nir.iterrows():
+        items_for_pdf.append({
+            "name": r["Denumire"],
+            "unit": r["UM"],
+            "qty": float(r["Cant."]),
+            "price": float(r["Preț unitar"]),
+            "line_net": float(r["Valoare netă"]),
+            "vat_pct": float(r["TVA %"]),
+            "total": float(r["Valoare (cu TVA)"]),
+        })
+
+    totals_for_pdf = {
+        "subtotal": float(inv_payload.get("totals", {}).get("net") or df_nir["Valoare netă"].sum()),
+        "vat": float(inv_payload.get("totals", {}).get("vat") or df_nir["TVA (lei)"].sum()),
+        "grand_total": float(inv_payload.get("totals", {}).get("gross") or df_nir["Valoare (cu TVA)"].sum()),
+    }
+
+    nir_data = {
+        "invoice_id": invoice_id_display,   # Afișare exact cum e în XML
+        "invoice_date": s(inv_payload.get("issue_date")),
+        "supplier": inv_payload.get("supplier") or {},
+        "buyer":    inv_payload.get("buyer") or {},
+        "items":    items_for_pdf,
+        "totals":   totals_for_pdf,
+    }
+
+    col_pdf, col_xlsx = st.columns([1,1])
+    with col_pdf:
         try:
             pdf_bytes = generate_pdf(nir_data)
             st.download_button(
-                label="Descarcă NIR (PDF)",
+                "Descarcă NIR (PDF)",
                 data=pdf_bytes,
-                file_name=f"NIR_{nir_data['invoice_id']}.pdf",
-                mime="application/pdf"
+                file_name=f"NIR_{invoice_id_file}.pdf",
+                mime="application/pdf",
+                key="dl_pdf",
             )
         except Exception as e:
-            st.warning(f"PDF indisponibil: {e}")
+            st.error(f"Eroare PDF: {e}")
 
-        # 11) Validări parser
-        probs = inv.get("validations", [])
-        if probs:
-            has_err = any(p.get("level") == "error" for p in probs)
-            (st.error if has_err else st.warning)("Au fost detectate probleme la verificări:")
-            for p in probs:
-                msg = p.get("msg", "")
-                if p.get("level") == "error":
-                    st.error(f"• {msg}")
-                else:
-                    st.warning(f"• {msg}")
-        else:
-            st.success("Validări OK (în limitele toleranței).")
+    with col_xlsx:
+        try:
+            export_xlsx(df_nir, nir_data, invoice_id_file)
+        except Exception as e:
+            st.error(f"Eroare Excel: {e}")
 
-    except Exception as e:
-        st.error(f"Eroare la parsare sau procesare: {e}")
+except Exception as e:
+    st.error(f"Eroare la parsare sau procesare: {e}")
