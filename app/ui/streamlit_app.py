@@ -8,6 +8,14 @@ from typing import Any, Dict, List
 import pandas as pd
 import streamlit as st
 import xmltodict
+# --- import path fix (Cloud safe) ---
+import os, sys
+_CURR = os.path.dirname(os.path.abspath(__file__))      # .../app/ui
+_REPO_ROOT = os.path.dirname(os.path.dirname(_CURR))    # .../<repo root>
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+# ------------------------------------
+
 
 # parser + exportere
 from app.parsers.ubl_parser import parse_invoice_minimal
